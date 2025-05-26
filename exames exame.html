@@ -1,0 +1,161 @@
+function extractLatestEvolutiveResults(ocrTextLaudoEvolutivo) {
+  if (!ocrTextLaudoEvolutivo || typeof ocrTextLaudoEvolutivo !== 'string') {
+    return "";
+  }
+  const lines = ocrTextLaudoEvolutivo.split('\n');
+  const extractedExamResults = [];
+
+  // Identificar as colunas de data e a coluna do valor de referência
+  let dateHeaderLine = "";
+  let columnIndexMap = {
+    examName: 0,
+    latestResult: -1, // Será o índice da coluna de resultado mais recente
+    reference: -1
+  };
+  let numberOfDateColumns = 0;
+
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+    // Procura a linha que contém as datas e "Valores de Referência"
+    if (trimmedLine.match(/\d{2}\/\d{2}\/\d{4}/) && trimmedLine.toUpperCase().includes("VALORES DE REFERÊNCIA")) {
+      dateHeaderLine = trimmedLine;
+      const parts = trimmedLine.split(/\s{2,}/); // Divide por 2 ou mais espaços
+      let dateCount = 0;
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].match(/\d{2}\/\d{2}\/\d{4}/)) {
+          dateCount++;
+        }
+        if (parts[i].toUpperCase().includes("VALORES DE REFERÊNCIA")) {
+          columnIndexMap.reference = i; // Índice da coluna de referência
+          break;
+        }
+      }
+      numberOfDateColumns = dateCount;
+      // A coluna de resultado mais recente é a última coluna de data antes da coluna de referência
+      if (columnIndexMap.reference > 0 && numberOfDateColumns > 0) {
+        columnIndexMap.latestResult = columnIndexMap.reference - 1;
+      }
+      break;
+    }
+  }
+
+  // Se não conseguirmos mapear as colunas de data de forma confiável,
+  // tentaremos uma heurística: pegar o último valor antes da referência, ou o último valor da linha.
+  // Para este formato, a coluna de referência é bem clara.
+  // A coluna de resultado mais recente é a coluna 29/04/2025 06:11 BRT
+  // No OCR, os valores são separados por espaços variáveis. Vamos tentar identificar a coluna correta.
+
+  // Heurística para a coluna de resultados mais recentes (29/04/2025 06:11 BRT)
+  // Isso precisa ser robusto ao espaçamento do OCR.
+  // A coluna "29/04/2025 06:11 BRT" é a 6ª coluna de dados principal, se contarmos a do nome como 0.
+  // No entanto, a forma como o OCR pode dividir isso é complexa.
+  // Vamos focar em pegar o último valor *antes* da coluna "Valores de Referência"
+
+  for (const line of lines) {
+    let trimmedLine = line.trim();
+
+    // Ignorar linhas de cabeçalho, rodapé, ou puramente divisórias
+    if (!trimmedLine ||
+        trimmedLine.toUpperCase().startsWith("LAUDO EVOLUTIVO") ||
+        trimmedLine.toUpperCase().startsWith("INTERNAÇÃO:") ||
+        trimmedLine.toUpperCase().startsWith("BIOQUÍMICA") || // Seções
+        trimmedLine.toUpperCase().startsWith("GASO ARTERIAL") ||
+        trimmedLine.toUpperCase().startsWith("GASO VENOSA") ||
+        trimmedLine.toUpperCase().startsWith("HEMATOLOGIA") ||
+        trimmedLine.toUpperCase().startsWith("DATA DA GERAÇÃO:") ||
+        trimmedLine.toUpperCase().startsWith("DR SANDRO") ||
+        trimmedLine.toUpperCase().startsWith("LABORATÓRIO REGISTRADO") ||
+        trimmedLine.toUpperCase().startsWith("PG ") ||
+        trimmedLine.toUpperCase().startsWith("DN:") ||
+        trimmedLine.toUpperCase().startsWith("SEXO:") ||
+        trimmedLine.toUpperCase().includes("VALORES DE REFERÊNCIA") && trimmedLine.match(/\d{2}\/\d{2}\/\d{4}/) // A linha de cabeçalho de data
+       ) {
+      continue;
+    }
+
+    // Regex para capturar nome do exame e o resto da linha que contém valores
+    // Nome do exame: Pode ter letras, espaços, acentos, parênteses.
+    // O resto da linha: Tudo depois de pelo menos dois espaços após o nome.
+    const examMatch = trimmedLine.match(/^([A-ZÁÉÍÓÚÇÃÕÑ\s().-]+?(?:\s\(.*?\))?)\s{2,}(.*)$/i);
+
+    if (examMatch) {
+      let examName = examMatch[1].trim().replace(/\s+/g, ' '); // Nome do exame, normalizado
+      let valuesString = examMatch[2];
+
+      // Dividir a string de valores. A divisão por múltiplos espaços é um desafio
+      // pois o OCR pode introduzir espaçamentos inconsistentes.
+      // Vamos tentar dividir por uma quantidade maior de espaços para separar as colunas principais.
+      // E depois, dentro de cada "coluna", pegar o primeiro token que parece um valor.
+      // Ou, uma abordagem mais simples: encontrar a string de "Valores de Referência"
+      // e pegar o bloco de texto imediatamente antes dela que corresponda a um resultado.
+
+      let latestResult = null;
+
+      // Se sabemos o número de colunas de data, podemos tentar ser mais precisos
+      if (numberOfDateColumns > 0 && columnIndexMap.reference !== -1) {
+        // Tentar dividir a linha de valores em aproximadamente numberOfDateColumns + 1 (para a de referência)
+        // Esta é a parte mais frágil devido à variabilidade do espaçamento do OCR
+        // Uma abordagem é pegar todos os "tokens" (palavras/números) e tentar mapeá-los às colunas.
+
+        // Heurística mais simples:
+        // Os valores são geralmente separados por espaços. O valor de referência está no final.
+        // O valor mais recente é o último antes do valor de referência.
+        const referenceColumnText = "de "; // Um marcador comum para início de referência
+        const indexOfReference = valuesString.toUpperCase().lastIndexOf(referenceColumnText.toUpperCase());
+
+        let stringForLatestResult;
+        if (indexOfReference > 0) {
+          stringForLatestResult = valuesString.substring(0, indexOfReference).trim();
+        } else {
+          // Se não encontrar "de ", pega toda a string de valores (pode ser que não haja ref. nesta linha)
+          stringForLatestResult = valuesString.trim();
+        }
+
+        // Pega o último "token" da stringForLatestResult que parece um valor
+        const potentialValues = stringForLatestResult.split(/\s+/);
+        for (let k = potentialValues.length - 1; k >= 0; k--) {
+          const val = potentialValues[k];
+          // Um valor pode ser um número, opcionalmente com vírgula, ponto, *, e seguido por unidade (mg/dL, U/L, etc.)
+          // Ou pode ser apenas "-"
+          if (val === "-" || val.match(/^([<>]?[\d,.]+[*]?)$/) || val.match(/^([<>]?[\d,.]+[*]?\s*[a-zA-Zµ/%]+(\/[a-zA-Zµ/%]+)?)$/)) {
+            // Verificação adicional: o token anterior não deve ser parte da unidade (ex: "mg" "/dL")
+            let prevTokenIsUnitPart = false;
+            if (k > 0 && potentialValues[k-1].match(/^[a-zA-Zµ/%]+$/) && val.match(/^\/[a-zA-Zµ/%]+$/)) {
+                prevTokenIsUnitPart = true; // Ex: "mg" "/dL"
+            } else if (k > 0 && potentialValues[k-1].match(/^[a-zA-Zµ/%]+$/) && val.match(/^[a-zA-Zµ/%]+$/)) {
+                // Se o anterior for texto e o atual também, pode ser uma unidade de duas palavras.
+                // Mas queremos o valor numérico.
+            }
+
+
+            if (!prevTokenIsUnitPart) {
+                latestResult = val;
+                // Se o valor não tem unidade, e o token seguinte tem, anexa a unidade
+                if (k + 1 < potentialValues.length && potentialValues[k+1].match(/^[a-zA-Zµ/%]+(\/[a-zA-Zµ/%]+)?$/) && val.match(/^([<>]?[\d,.]+[*]?)$/)) {
+                    latestResult += " " + potentialValues[k+1];
+                }
+                break;
+            } else if (prevTokenIsUnitPart) { // Se o atual é a segunda parte da unidade do anterior
+                latestResult = potentialValues[k-1] + val;
+                 // Precisamos pegar o valor numérico antes disso
+                if (k-2 >= 0 && potentialValues[k-2].match(/^([<>]?[\d,.]+[*]?)$/)) {
+                    latestResult = potentialValues[k-2] + " " + latestResult;
+                }
+                break;
+            }
+          }
+        }
+      }
+
+
+      if (latestResult && latestResult.trim() !== "" && latestResult.trim() !== "-") {
+        // Limpar nome do exame de possíveis ruídos no final (como unidades perdidas)
+        if (examName.length > 2 && !/^\d+$/.test(examName)) { // Nome deve ter mais de 2 chars e não ser só número
+           extractedExamResults.push(`${examName}: ${latestResult.trim()}`);
+        }
+      }
+    }
+  }
+
+  return extractedExamResults.join(", ");
+}
